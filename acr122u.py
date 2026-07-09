@@ -314,6 +314,33 @@ class ACR122U:
         return parse_encrypted_container(bytes(buf), password)
 
     # ------------------------------------------------------------------ #
+    # WiFi 접속정보 (WPS/WSC NDEF) — NTAG / Ultralight
+    # ------------------------------------------------------------------ #
+    def write_wifi(self, ssid, password, auth="WPA2-PSK", enc=None, start_page=4):
+        """
+        WiFi 접속정보를 WSC NDEF 레코드로 NTAG/Ultralight에 기록.
+        enc가 None이면 auth에 맞춰 자동 선택. 기록한 페이지 수를 반환.
+        """
+        tlv = build_wifi_wsc_ndef_tlv(ssid, password, auth, enc)
+        if len(tlv) % 4:
+            tlv += bytes(4 - (len(tlv) % 4))
+        page = start_page
+        for i in range(0, len(tlv), 4):
+            self.write_block(page, list(tlv[i:i + 4]))
+            page += 1
+        return page - start_page
+
+    def read_wifi(self, start_page=4, max_pages=48):
+        """NTAG/Ultralight에서 WiFi WSC 레코드를 읽어 dict로 반환 (없으면 None)."""
+        buf = bytearray()
+        for page in range(start_page, start_page + max_pages):
+            try:
+                buf += bytes(self.read_block(page, 4))
+            except ACR122UError:
+                break
+        return parse_wifi_from_tag(bytes(buf))
+
+    # ------------------------------------------------------------------ #
     # 부저 / LED
     # ------------------------------------------------------------------ #
     def led_buzzer(self, led_state, t1=0x02, t2=0x00, reps=0x01, buzzer=0x01):
@@ -501,3 +528,169 @@ def parse_encrypted_container(data, password):
     if len(payload) < length:
         raise ACR122UError("암호화 데이터가 불완전합니다(길이 부족).")
     return decrypt_bytes(payload, password)
+
+
+# ---------------------------------------------------------------------- #
+# WiFi 접속정보 (WPS / WSC NDEF) 헬퍼
+# ---------------------------------------------------------------------- #
+# WSC 속성 ID
+_WSC_CREDENTIAL = 0x100E
+_WSC_NETWORK_INDEX = 0x1026
+_WSC_SSID = 0x1045
+_WSC_AUTH_TYPE = 0x1003
+_WSC_ENC_TYPE = 0x100F
+_WSC_NETWORK_KEY = 0x1027
+_WSC_MAC_ADDRESS = 0x1020
+
+WIFI_AUTH = {
+    "OPEN": 0x0001,
+    "WPA-PSK": 0x0002,
+    "WPA2-PSK": 0x0020,
+    "WPA/WPA2-PSK": 0x0022,
+}
+WIFI_ENC = {
+    "NONE": 0x0001,
+    "WEP": 0x0002,
+    "TKIP": 0x0004,
+    "AES": 0x0008,
+    "AES/TKIP": 0x000C,
+}
+# auth → 기본 encryption
+_DEFAULT_ENC = {
+    "OPEN": "NONE",
+    "WPA-PSK": "TKIP",
+    "WPA2-PSK": "AES",
+    "WPA/WPA2-PSK": "AES",
+}
+_WIFI_MIME = b"application/vnd.wfa.wsc"
+_AUTH_NAMES = {v: k for k, v in WIFI_AUTH.items()}
+_ENC_NAMES = {v: k for k, v in WIFI_ENC.items()}
+
+
+def _wsc_tlv(type_id, value):
+    """WSC 속성 TLV(2바이트 type + 2바이트 length + value)를 생성."""
+    return type_id.to_bytes(2, "big") + len(value).to_bytes(2, "big") + bytes(value)
+
+
+def _wsc_walk(buf):
+    """WSC TLV 목록을 [(type, value), ...]로 파싱."""
+    out = []
+    i = 0
+    while i + 4 <= len(buf):
+        t = int.from_bytes(buf[i:i + 2], "big")
+        ln = int.from_bytes(buf[i + 2:i + 4], "big")
+        out.append((t, buf[i + 4:i + 4 + ln]))
+        i += 4 + ln
+    return out
+
+
+def build_wifi_wsc(ssid, password, auth="WPA2-PSK", enc=None):
+    """WiFi 접속정보를 WSC Credential 페이로드(bytes)로 생성."""
+    auth_key = auth.upper() if isinstance(auth, str) else auth
+    if auth_key not in WIFI_AUTH:
+        raise ACR122UError(f"지원하지 않는 인증 방식: {auth}")
+    if enc is None:
+        enc_key = _DEFAULT_ENC[auth_key]
+    else:
+        enc_key = enc.upper() if isinstance(enc, str) else enc
+    if enc_key not in WIFI_ENC:
+        raise ACR122UError(f"지원하지 않는 암호화 방식: {enc}")
+
+    cred = bytearray()
+    cred += _wsc_tlv(_WSC_NETWORK_INDEX, b"\x01")
+    cred += _wsc_tlv(_WSC_SSID, ssid.encode("utf-8"))
+    cred += _wsc_tlv(_WSC_AUTH_TYPE, WIFI_AUTH[auth_key].to_bytes(2, "big"))
+    cred += _wsc_tlv(_WSC_ENC_TYPE, WIFI_ENC[enc_key].to_bytes(2, "big"))
+    if auth_key != "OPEN" and password:
+        cred += _wsc_tlv(_WSC_NETWORK_KEY, password.encode("utf-8"))
+    cred += _wsc_tlv(_WSC_MAC_ADDRESS, b"\x00" * 6)
+    return _wsc_tlv(_WSC_CREDENTIAL, bytes(cred))
+
+
+def build_wifi_wsc_ndef_tlv(ssid, password, auth="WPA2-PSK", enc=None):
+    """WiFi WSC 레코드를 NDEF media-type 레코드로 만들어 TLV로 감싼 bytes를 반환."""
+    payload = build_wifi_wsc(ssid, password, auth, enc)
+    if len(payload) < 256:
+        # 짧은 레코드: MB=ME=SR=1, TNF=002(media) → 0xD2
+        record = bytes([0xD2, len(_WIFI_MIME), len(payload)]) + _WIFI_MIME + payload
+    else:
+        # 긴 레코드: SR=0 → 0xC2, 페이로드 길이 4바이트
+        record = (bytes([0xC2, len(_WIFI_MIME)]) + len(payload).to_bytes(4, "big")
+                  + _WIFI_MIME + payload)
+    if len(record) < 255:
+        return bytes([0x03, len(record)]) + record + bytes([0xFE])
+    return bytes([0x03, 0xFF]) + len(record).to_bytes(2, "big") + record + bytes([0xFE])
+
+
+def parse_wifi_wsc(payload):
+    """WSC Credential 페이로드에서 ssid/password/auth/enc를 추출해 dict로 반환."""
+    result = {}
+    for t, v in _wsc_walk(payload):
+        if t != _WSC_CREDENTIAL:
+            continue
+        for st, sv in _wsc_walk(v):
+            if st == _WSC_SSID:
+                result["ssid"] = sv.decode("utf-8", errors="replace")
+            elif st == _WSC_NETWORK_KEY:
+                result["password"] = sv.decode("utf-8", errors="replace")
+            elif st == _WSC_AUTH_TYPE:
+                code = int.from_bytes(sv, "big")
+                result["auth"] = _AUTH_NAMES.get(code, f"0x{code:04X}")
+            elif st == _WSC_ENC_TYPE:
+                code = int.from_bytes(sv, "big")
+                result["enc"] = _ENC_NAMES.get(code, f"0x{code:04X}")
+    return result or None
+
+
+def parse_wifi_from_tag(data):
+    """태그에서 읽은 바이트열에서 WiFi WSC 레코드를 찾아 dict로 반환 (없으면 None)."""
+    i = 0
+    n = len(data)
+    while i < n:
+        t = data[i]
+        if t == 0x00:
+            i += 1
+            continue
+        if t == 0xFE:
+            break
+        if i + 1 >= n:
+            break
+        length = data[i + 1]
+        idx = i + 2
+        if length == 0xFF:  # 3바이트 길이 형식
+            if i + 3 >= n:
+                break
+            length = int.from_bytes(bytes(data[i + 2:i + 4]), "big")
+            idx = i + 4
+        value = bytes(data[idx:idx + length])
+        if t == 0x03:  # NDEF 메시지
+            return _parse_wifi_record(value)
+        i = idx + length
+    return None
+
+
+def _parse_wifi_record(rec):
+    """NDEF 레코드에서 WiFi WSC 페이로드를 파싱."""
+    if len(rec) < 3:
+        return None
+    header = rec[0]
+    type_len = rec[1]
+    short = bool(header & 0x10)   # SR
+    has_id = bool(header & 0x08)  # IL
+    idx = 2
+    if short:
+        payload_len = rec[idx]
+        idx += 1
+    else:
+        payload_len = int.from_bytes(rec[idx:idx + 4], "big")
+        idx += 4
+    id_len = 0
+    if has_id:
+        id_len = rec[idx]
+        idx += 1
+    rec_type = rec[idx:idx + type_len]
+    idx += type_len + id_len
+    payload = rec[idx:idx + payload_len]
+    if rec_type == _WIFI_MIME:
+        return parse_wifi_wsc(payload)
+    return None

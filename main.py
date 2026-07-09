@@ -100,6 +100,7 @@ class NFCApp(tk.Tk):
         self._build_ntag_tab(nb)
         self._build_text_tab(nb)
         self._build_encrypt_tab(nb)
+        self._build_wifi_tab(nb)
         self._build_device_tab(nb)
 
         # --- 로그 ---
@@ -231,6 +232,50 @@ class NFCApp(tk.Tk):
 
     def _toggle_pw_show(self):
         self.enc_pw_entry["show"] = "" if self.enc_show_var.get() else "*"
+
+    def _build_wifi_tab(self, nb):
+        f = ttk.Frame(nb)
+        nb.add(f, text="WiFi")
+
+        ttk.Label(f, text="네트워크(SSID):").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        self.wifi_ssid_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self.wifi_ssid_var, width=28).grid(
+            row=0, column=1, columnspan=2, sticky="w", padx=6
+        )
+
+        ttk.Label(f, text="비밀번호:").grid(row=1, column=0, sticky="e", padx=6, pady=6)
+        self.wifi_pw_var = tk.StringVar()
+        self.wifi_pw_entry = ttk.Entry(f, textvariable=self.wifi_pw_var, width=28, show="*")
+        self.wifi_pw_entry.grid(row=1, column=1, columnspan=2, sticky="w", padx=6)
+        self.wifi_show_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f, text="표시", variable=self.wifi_show_var,
+            command=lambda: self.wifi_pw_entry.configure(
+                show="" if self.wifi_show_var.get() else "*"
+            ),
+        ).grid(row=1, column=3, sticky="w", padx=4)
+
+        ttk.Label(f, text="보안:").grid(row=2, column=0, sticky="e", padx=6, pady=6)
+        self.wifi_auth_var = tk.StringVar(value="WPA2-PSK")
+        ttk.Combobox(
+            f, textvariable=self.wifi_auth_var,
+            values=["WPA2-PSK", "WPA/WPA2-PSK", "WPA-PSK", "OPEN"],
+            width=14, state="readonly",
+        ).grid(row=2, column=1, sticky="w", padx=6)
+
+        btns = ttk.Frame(f)
+        btns.grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=10)
+        ttk.Button(btns, text="WiFi 태그 쓰기", command=self._wifi_write).pack(side="left", padx=4)
+        ttk.Button(btns, text="읽기(확인)", command=self._wifi_read).pack(side="left", padx=4)
+
+        ttk.Label(
+            f,
+            text="※ 안드로이드는 탭하면 연결 팝업이 뜹니다. 아이폰(iOS)은 자동 연결을 지원하지 않습니다.",
+            foreground="#a60",
+            wraplength=520,
+            justify="left",
+        ).grid(row=4, column=0, columnspan=4, sticky="w", padx=6)
+        f.columnconfigure(3, weight=1)
 
     def _build_device_tab(self, nb):
         f = ttk.Frame(nb)
@@ -504,6 +549,45 @@ class NFCApp(tk.Tk):
                     self.log(f"[암호화] 복호화 성공 ({len(text)}자)")
             except ACR122UError as e:
                 self.log(f"[암호화] 복호화 오류: {e}")
+
+    def _wifi_write(self):
+        ssid = self.wifi_ssid_var.get()
+        auth = self.wifi_auth_var.get()
+        password = self.wifi_pw_var.get()
+        if not ssid:
+            messagebox.showwarning("입력 오류", "SSID를 입력하세요.")
+            return
+        if auth != "OPEN" and not password:
+            messagebox.showwarning("입력 오류", "비밀번호를 입력하세요. (OPEN 네트워크가 아니라면)")
+            return
+        with self.lock:
+            if not self._ensure_card():
+                return
+            try:
+                pages = self.nfc.write_wifi(ssid, password, auth)
+                self.log(f"[WiFi] '{ssid}' 태그 쓰기 완료 ({auth}, {pages}페이지)")
+            except ACR122UError as e:
+                self.log(f"[WiFi] 쓰기 오류: {e}")
+
+    def _wifi_read(self):
+        with self.lock:
+            if not self._ensure_card():
+                return
+            try:
+                info = self.nfc.read_wifi()
+                if info is None:
+                    self.log("[WiFi] WiFi 태그 정보를 찾지 못했습니다.")
+                else:
+                    self.wifi_ssid_var.set(info.get("ssid", ""))
+                    self.wifi_pw_var.set(info.get("password", ""))
+                    if info.get("auth") in ("WPA2-PSK", "WPA/WPA2-PSK", "WPA-PSK", "OPEN"):
+                        self.wifi_auth_var.set(info["auth"])
+                    self.log(
+                        f"[WiFi] 읽기: SSID={info.get('ssid')!r} "
+                        f"보안={info.get('auth')} 암호화={info.get('enc')}"
+                    )
+            except ACR122UError as e:
+                self.log(f"[WiFi] 읽기 오류: {e}")
 
     def _firmware(self):
         with self.lock:

@@ -23,6 +23,10 @@ from acr122u import (  # noqa: E402
     parse_encrypted_container,
     encrypt_bytes,
     decrypt_bytes,
+    build_wifi_wsc,
+    build_wifi_wsc_ndef_tlv,
+    parse_wifi_wsc,
+    parse_wifi_from_tag,
 )
 
 
@@ -179,3 +183,51 @@ def test_container_wrong_password_raises():
 
 def test_parse_container_no_magic_returns_none():
     assert parse_encrypted_container(bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]), "pw") is None
+
+
+# ---------------------------------------------------------------------- #
+# WiFi WSC (WPS) 태그
+# ---------------------------------------------------------------------- #
+def test_wifi_wsc_roundtrip():
+    payload = build_wifi_wsc("SchoolWiFi", "s3cret!!", "WPA2-PSK")
+    info = parse_wifi_wsc(payload)
+    assert info["ssid"] == "SchoolWiFi"
+    assert info["password"] == "s3cret!!"
+    assert info["auth"] == "WPA2-PSK"
+    assert info["enc"] == "AES"
+
+
+def test_wifi_ndef_structure():
+    tlv = build_wifi_wsc_ndef_tlv("Net", "pass1234", "WPA2-PSK")
+    assert tlv[0] == 0x03           # NDEF 메시지 TLV
+    assert tlv[-1] == 0xFE          # 종료 TLV
+    assert b"application/vnd.wfa.wsc" in tlv   # media-type 레코드
+    assert tlv[2] == 0xD2           # 레코드 헤더 (MB=ME=SR=1, TNF=media)
+
+
+def test_wifi_from_tag_roundtrip():
+    tlv = build_wifi_wsc_ndef_tlv("교실WiFi", "비번1234abcd", "WPA/WPA2-PSK")
+    info = parse_wifi_from_tag(tlv)
+    assert info["ssid"] == "교실WiFi"
+    assert info["password"] == "비번1234abcd"
+    assert info["auth"] == "WPA/WPA2-PSK"
+
+
+def test_wifi_open_network_has_no_password():
+    payload = build_wifi_wsc("FreeWiFi", "", "OPEN")
+    info = parse_wifi_wsc(payload)
+    assert info["ssid"] == "FreeWiFi"
+    assert info["auth"] == "OPEN"
+    assert info["enc"] == "NONE"
+    assert "password" not in info
+
+
+def test_wifi_invalid_auth_raises():
+    with pytest.raises(ACR122UError):
+        build_wifi_wsc("X", "y", "WPA3-SAE")
+
+
+def test_wifi_from_tag_no_wifi_returns_none():
+    # 일반 텍스트 NDEF에는 WiFi 레코드가 없음
+    text_tlv = build_ndef_text_tlv("hello", "en")
+    assert parse_wifi_from_tag(text_tlv) is None
