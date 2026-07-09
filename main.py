@@ -15,12 +15,14 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 try:
+    import acr122u
     from acr122u import ACR122U, ACR122UError
-    PYSCARD_OK = True
-    IMPORT_ERROR = ""
-except ImportError as e:  # pyscard 미설치 등
+    PYSCARD_OK = acr122u.PYSCARD_AVAILABLE
+    IMPORT_ERROR = "" if PYSCARD_OK else "pyscard 네이티브 모듈을 불러올 수 없습니다."
+except ImportError as e:  # acr122u 자체 로드 실패 등
     PYSCARD_OK = False
     IMPORT_ERROR = str(e)
+    ACR122UError = Exception  # main() 진입 전 참조 방지용
 
 
 POLL_INTERVAL = 0.4  # 카드 감지 주기(초)
