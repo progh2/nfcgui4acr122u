@@ -99,6 +99,7 @@ class NFCApp(tk.Tk):
         self._build_classic_tab(nb)
         self._build_ntag_tab(nb)
         self._build_text_tab(nb)
+        self._build_url_tab(nb)
         self._build_encrypt_tab(nb)
         self._build_wifi_tab(nb)
         self._build_device_tab(nb)
@@ -199,6 +200,30 @@ class NFCApp(tk.Tk):
             text="※ NTAG213/215/216 등 NDEF 지원 태그에서 동작합니다.",
             foreground="#a60",
         ).grid(row=3, column=0, columnspan=4, sticky="w", padx=6)
+        f.columnconfigure(3, weight=1)
+
+    def _build_url_tab(self, nb):
+        f = ttk.Frame(nb)
+        nb.add(f, text="웹사이트(URL)")
+
+        ttk.Label(f, text="주소(URL):").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        self.url_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self.url_var, width=46).grid(
+            row=0, column=1, columnspan=3, sticky="we", padx=6, pady=6
+        )
+
+        btns = ttk.Frame(f)
+        btns.grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=10)
+        ttk.Button(btns, text="URL 태그 쓰기", command=self._url_write).pack(side="left", padx=4)
+        ttk.Button(btns, text="읽기(확인)", command=self._url_read).pack(side="left", padx=4)
+
+        ttk.Label(
+            f,
+            text="※ 탭하면 브라우저에서 해당 주소가 열립니다. 스킴(http/https)이 없으면 https://를 자동으로 붙입니다.",
+            foreground="#a60",
+            wraplength=520,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=6)
         f.columnconfigure(3, weight=1)
 
     def _build_encrypt_tab(self, nb):
@@ -512,6 +537,38 @@ class NFCApp(tk.Tk):
                 self.log(f"[NDEF] 텍스트 쓰기 완료 ({pages}페이지): {text!r}")
             except ACR122UError as e:
                 self.log(f"[NDEF] 쓰기 오류: {e}")
+
+    def _url_write(self):
+        url = self.url_var.get().strip()
+        if not url:
+            messagebox.showwarning("입력 오류", "URL을 입력하세요.")
+            return
+        # 스킴이 없으면 https:// 자동 보정 (tel:/mailto: 등은 그대로)
+        if "://" not in url and not url.startswith(("tel:", "mailto:")):
+            url = "https://" + url
+            self.url_var.set(url)
+        with self.lock:
+            if not self._ensure_card():
+                return
+            try:
+                pages = self.nfc.write_url(url)
+                self.log(f"[URL] 태그 쓰기 완료 ({pages}페이지): {url}")
+            except ACR122UError as e:
+                self.log(f"[URL] 쓰기 오류: {e}")
+
+    def _url_read(self):
+        with self.lock:
+            if not self._ensure_card():
+                return
+            try:
+                value = self.nfc.read_ndef_text()
+                if value is None:
+                    self.log("[URL] NDEF 레코드를 찾지 못했습니다.")
+                else:
+                    self.url_var.set(value)
+                    self.log(f"[URL] 읽기: {value}")
+            except ACR122UError as e:
+                self.log(f"[URL] 읽기 오류: {e}")
 
     def _encrypt_write(self):
         text = self.enc_text.get("1.0", "end-1c")
