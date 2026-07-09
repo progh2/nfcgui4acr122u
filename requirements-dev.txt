@@ -1,3 +1,4 @@
 # 개발/테스트 의존성
 -r requirements.txt
 pytest>=7.0
+pyinstaller>=6.0    # exe 빌드용 (build_exe.bat)

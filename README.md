@@ -40,6 +40,19 @@ python main.py
 
 Windows에서는 `run.bat`을 더블클릭해도 됩니다.
 
+### 단독 실행 파일(.exe) 만들기
+
+파이썬이 설치되지 않은 PC(예: 교실 컴퓨터)에서도 실행하려면 `.exe`로 빌드하세요.
+
+```bash
+build_exe.bat        # 또는 아래 명령 직접 실행
+python -m PyInstaller --onefile --windowed --name NFC-ACR122U --collect-submodules smartcard main.py
+```
+
+- 결과물: `dist\NFC-ACR122U.exe` (약 14MB, 단일 파일)
+- pyscard·cryptography·tkinter가 모두 포함되어 별도 설치 없이 동작합니다.
+- 대상 PC에도 **ACR122U 드라이버(PC/SC)** 와 스마트카드 서비스는 필요합니다.
+
 ## 사용법
 
 1. 상단에서 리더(`ACS ACR122 0` 등)를 선택하고 **연결**을 누르면 카드 감지가 시작됩니다.
