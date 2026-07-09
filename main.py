@@ -42,6 +42,11 @@ class NFCApp(tk.Tk):
         self.current_uid = None
         self._last_info = None                 # 마지막으로 읽은 카드 정보 캐시
         self.ui_queue = queue.Queue()          # 백그라운드 → GUI 메시지 큐
+        # 일괄 굽기 상태
+        self.batch_active = False
+        self.batch_writer = None               # 캡처된 쓰기 콜백
+        self.batch_seen = set()                # 이미 구운 UID
+        self.batch_count = 0
 
         self._build_ui()
         self._refresh_readers()
@@ -102,6 +107,8 @@ class NFCApp(tk.Tk):
         self._build_url_tab(nb)
         self._build_encrypt_tab(nb)
         self._build_wifi_tab(nb)
+        self._build_batch_tab(nb)
+        self._build_manage_tab(nb)
         self._build_device_tab(nb)
 
         # --- 로그 ---
@@ -302,6 +309,146 @@ class NFCApp(tk.Tk):
         ).grid(row=4, column=0, columnspan=4, sticky="w", padx=6)
         f.columnconfigure(3, weight=1)
 
+    def _build_batch_tab(self, nb):
+        f = ttk.Frame(nb)
+        nb.add(f, text="일괄 굽기")
+
+        ttk.Label(f, text="종류:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        self.batch_kind_var = tk.StringVar(value="URL")
+        ttk.Combobox(
+            f, textvariable=self.batch_kind_var,
+            values=["URL", "텍스트", "WiFi"], width=12, state="readonly",
+        ).grid(row=0, column=1, sticky="w", padx=6)
+
+        self.batch_btn = ttk.Button(f, text="일괄 모드 시작", command=self._batch_toggle)
+        self.batch_btn.grid(row=0, column=2, padx=6)
+
+        self.batch_status_var = tk.StringVar(value="대기 중")
+        ttk.Label(f, textvariable=self.batch_status_var, foreground="#0a5",
+                  font=("", 11, "bold")).grid(row=1, column=0, columnspan=3, sticky="w", padx=6, pady=6)
+
+        ttk.Label(
+            f,
+            text="선택한 종류의 내용은 해당 탭(웹사이트/텍스트/WiFi)에서 먼저 입력하세요.\n"
+                 "시작 후 태그를 하나씩 올렸다 빼면 자동으로 기록됩니다. 같은 태그는 한 번만 기록.",
+            foreground="#a60", justify="left", wraplength=520,
+        ).grid(row=2, column=0, columnspan=3, sticky="w", padx=6)
+        f.columnconfigure(2, weight=1)
+
+    def _make_batch_writer(self, kind):
+        """(writer_callable, 설명, 오류메시지) 반환. 오류 시 writer=None."""
+        if kind == "URL":
+            url = self.url_var.get().strip()
+            if not url:
+                return None, None, "‘웹사이트(URL)’ 탭에서 주소를 입력하세요."
+            if "://" not in url and not url.startswith(("tel:", "mailto:")):
+                url = "https://" + url
+            return (lambda: self.nfc.write_url(url)), f"URL: {url}", None
+        if kind == "텍스트":
+            text = self.text_input.get("1.0", "end-1c")
+            if not text:
+                return None, None, "‘텍스트(NDEF)’ 탭에서 텍스트를 입력하세요."
+            lang = self.lang_var.get() or "en"
+            return (lambda: self.nfc.write_ndef_text(text, lang)), "텍스트", None
+        if kind == "WiFi":
+            ssid = self.wifi_ssid_var.get()
+            auth = self.wifi_auth_var.get()
+            pw = self.wifi_pw_var.get()
+            if not ssid:
+                return None, None, "‘WiFi’ 탭에서 SSID를 입력하세요."
+            if auth != "OPEN" and not pw:
+                return None, None, "‘WiFi’ 탭에서 비밀번호를 입력하세요."
+            return (lambda: self.nfc.write_wifi(ssid, pw, auth)), f"WiFi: {ssid}", None
+        return None, None, "알 수 없는 종류"
+
+    def _batch_toggle(self):
+        if self.batch_active:
+            self.batch_active = False
+            self.batch_btn["text"] = "일괄 모드 시작"
+            self.batch_status_var.set(f"중지됨 — 총 {self.batch_count}장 완료")
+            self.log(f"[일괄] 중지 (총 {self.batch_count}장)")
+            return
+        if not self.polling:
+            messagebox.showwarning("연결 필요", "먼저 '연결' 버튼으로 감지를 시작하세요.")
+            return
+        writer, desc, err = self._make_batch_writer(self.batch_kind_var.get())
+        if err:
+            messagebox.showwarning("입력 필요", err)
+            return
+        # tk 값은 메인 스레드에서 캡처된 writer로만 사용 (감지 스레드에서 tk 접근 방지)
+        self.batch_writer = writer
+        self.batch_seen = set()
+        self.batch_count = 0
+        self.batch_active = True
+        self.batch_btn["text"] = "일괄 모드 중지"
+        self.batch_status_var.set("구운 태그: 0장 — 태그를 올리세요")
+        self.log(f"[일괄] 시작 — {desc}")
+
+    def _batch_write(self, uid):
+        """감지 스레드에서 호출. 현재 태그에 배치 내용을 기록."""
+        with self.lock:
+            try:
+                if not self.nfc.is_connected():
+                    self.nfc.connect()
+                self.batch_writer()
+                try:
+                    self.nfc.beep()
+                except Exception:
+                    pass
+                ok, err = True, None
+            except Exception as e:
+                ok, err = False, e
+        self.batch_seen.add(uid)  # 성공/실패 모두 재시도 방지
+        if ok:
+            self.batch_count += 1
+        self.ui_queue.put(("batch", (ok, self.batch_count, uid, None if ok else str(err))))
+
+    def _build_manage_tab(self, nb):
+        f = ttk.Frame(nb)
+        nb.add(f, text="태그 관리")
+
+        ttk.Button(f, text="태그 초기화 (지우기)", command=self._erase_tag).grid(
+            row=0, column=0, sticky="w", padx=6, pady=(10, 4)
+        )
+        ttk.Label(f, text="사용자 데이터(4페이지~)를 0으로 지웁니다.",
+                  foreground="#666").grid(row=0, column=1, sticky="w", padx=6)
+
+        ttk.Button(f, text="⚠️ 태그 영구 잠금 (읽기전용)", command=self._lock_tag).grid(
+            row=1, column=0, sticky="w", padx=6, pady=(14, 4)
+        )
+        ttk.Label(f, text="페이지 3~15를 영구 읽기전용으로. 되돌릴 수 없습니다!",
+                  foreground="#c00").grid(row=1, column=1, sticky="w", padx=6)
+
+    def _erase_tag(self):
+        if not messagebox.askyesno("태그 초기화", "이 태그의 사용자 데이터를 모두 지웁니다.\n계속할까요?"):
+            return
+        with self.lock:
+            if not self._ensure_card():
+                return
+            try:
+                n = self.nfc.erase_tag()
+                self.log(f"[관리] 태그 초기화 완료 ({n}페이지 지움)")
+            except ACR122UError as e:
+                self.log(f"[관리] 초기화 오류: {e}")
+
+    def _lock_tag(self):
+        if not messagebox.askyesno(
+            "⚠️ 태그 영구 잠금",
+            "태그를 읽기전용으로 영구 잠급니다.\n한 번 잠그면 다시 쓸 수 없습니다!\n\n계속할까요?",
+            icon="warning",
+        ):
+            return
+        if not messagebox.askyesno("최종 확인", "정말로 이 태그를 영구 잠글까요?"):
+            return
+        with self.lock:
+            if not self._ensure_card():
+                return
+            try:
+                self.nfc.lock_tag_static()
+                self.log("[관리] 태그 잠금 완료 (페이지 3~15 읽기전용)")
+            except ACR122UError as e:
+                self.log(f"[관리] 잠금 오류: {e}")
+
     def _build_device_tab(self, nb):
         f = ttk.Frame(nb)
         nb.add(f, text="장치 제어")
@@ -365,6 +512,10 @@ class NFCApp(tk.Tk):
 
     def _stop_polling(self):
         self.polling = False
+        if self.batch_active:
+            self.batch_active = False
+            self.batch_btn["text"] = "일괄 모드 시작"
+            self.batch_status_var.set(f"중지됨 — 총 {self.batch_count}장 완료")
         self.connect_btn["text"] = "연결"
         self.status_var.set("● 연결 안 됨")
         self.uid_var.set("-")
@@ -417,6 +568,9 @@ class NFCApp(tk.Tk):
                 if self.current_uid != info["uid"]:
                     self.current_uid = info["uid"]
                     self.ui_queue.put(("card", dict(info)))
+                # 일괄 굽기: 새 태그면 자동 기록 (이미 구운 UID는 건너뜀)
+                if self.batch_active and info["uid"] not in self.batch_seen:
+                    self._batch_write(info["uid"])
             else:
                 misses += 1
                 # 연속 2회 이상 실패해야 실제 제거로 판정 (단발 글리치 무시)
@@ -701,6 +855,13 @@ class NFCApp(tk.Tk):
                 kind, payload = self.ui_queue.get_nowait()
                 if kind == "card":
                     self._update_card_info(payload)
+                elif kind == "batch":
+                    ok, count, uid, err = payload
+                    if ok:
+                        self.batch_status_var.set(f"구운 태그: {count}장 — 다음 태그를 올리세요")
+                        self.log(f"[일괄] {count}장째 완료 (UID {uid}) ✅")
+                    else:
+                        self.log(f"[일괄] 쓰기 실패 (UID {uid}): {err}")
         except queue.Empty:
             pass
         self.after(100, self._drain_queue)

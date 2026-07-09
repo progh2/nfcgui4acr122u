@@ -354,6 +354,33 @@ class ACR122U:
         return parse_wifi_from_tag(bytes(buf))
 
     # ------------------------------------------------------------------ #
+    # 태그 관리 (초기화 / 잠금) — NTAG / Ultralight
+    # ------------------------------------------------------------------ #
+    def erase_tag(self, start_page=4, num_pages=36):
+        """
+        NTAG/Ultralight 사용자 페이지를 0으로 지운다.
+        쓰기 실패(태그 끝/잠김)를 만나면 멈추고, 지운 페이지 수를 반환.
+        """
+        count = 0
+        for page in range(start_page, start_page + num_pages):
+            try:
+                self.write_block(page, [0x00, 0x00, 0x00, 0x00])
+            except ACR122UError:
+                break
+            count += 1
+        return count
+
+    def lock_tag_static(self):
+        """
+        NTAG/Ultralight 정적 잠금 비트를 설정해 페이지 3~15를 영구 읽기전용으로 만든다.
+
+        ⚠️ 되돌릴 수 없다. 페이지 2의 앞 2바이트(BCC1, Internal)는 반드시 보존해야
+        하므로 먼저 읽어서 유지하고, 잠금 바이트(2,3)만 0xFF로 설정한다.
+        """
+        page2 = self.read_block(2, 4)  # [BCC1, Internal, LOCK0, LOCK1]
+        self.write_block(2, [page2[0], page2[1], 0xFF, 0xFF])
+
+    # ------------------------------------------------------------------ #
     # 부저 / LED
     # ------------------------------------------------------------------ #
     def led_buzzer(self, led_state, t1=0x02, t2=0x00, reps=0x01, buzzer=0x01):
