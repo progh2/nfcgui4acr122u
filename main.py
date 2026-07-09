@@ -99,6 +99,7 @@ class NFCApp(tk.Tk):
         self._build_classic_tab(nb)
         self._build_ntag_tab(nb)
         self._build_text_tab(nb)
+        self._build_encrypt_tab(nb)
         self._build_device_tab(nb)
 
         # --- 로그 ---
@@ -198,6 +199,38 @@ class NFCApp(tk.Tk):
             foreground="#a60",
         ).grid(row=3, column=0, columnspan=4, sticky="w", padx=6)
         f.columnconfigure(3, weight=1)
+
+    def _build_encrypt_tab(self, nb):
+        f = ttk.Frame(nb)
+        nb.add(f, text="암호화 데이터")
+
+        ttk.Label(f, text="비밀번호:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        self.enc_pw_var = tk.StringVar()
+        self.enc_pw_entry = ttk.Entry(f, textvariable=self.enc_pw_var, width=24, show="*")
+        self.enc_pw_entry.grid(row=0, column=1, sticky="w", padx=6)
+        self.enc_show_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f, text="표시", variable=self.enc_show_var, command=self._toggle_pw_show
+        ).grid(row=0, column=2, sticky="w", padx=4)
+
+        ttk.Label(f, text="텍스트:").grid(row=1, column=0, sticky="ne", padx=6, pady=6)
+        self.enc_text = tk.Text(f, height=5, width=50, wrap="word")
+        self.enc_text.grid(row=1, column=1, columnspan=3, sticky="we", padx=6, pady=6)
+
+        btns = ttk.Frame(f)
+        btns.grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=10)
+        ttk.Button(btns, text="암호화 쓰기", command=self._encrypt_write).pack(side="left", padx=4)
+        ttk.Button(btns, text="복호화 읽기", command=self._encrypt_read).pack(side="left", padx=4)
+
+        ttk.Label(
+            f,
+            text="※ AES-256-GCM + PBKDF2. 비밀번호를 잊으면 복구할 수 없습니다.",
+            foreground="#a60",
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=6)
+        f.columnconfigure(3, weight=1)
+
+    def _toggle_pw_show(self):
+        self.enc_pw_entry["show"] = "" if self.enc_show_var.get() else "*"
 
     def _build_device_tab(self, nb):
         f = ttk.Frame(nb)
@@ -434,6 +467,43 @@ class NFCApp(tk.Tk):
                 self.log(f"[NDEF] 텍스트 쓰기 완료 ({pages}페이지): {text!r}")
             except ACR122UError as e:
                 self.log(f"[NDEF] 쓰기 오류: {e}")
+
+    def _encrypt_write(self):
+        text = self.enc_text.get("1.0", "end-1c")
+        password = self.enc_pw_var.get()
+        if not text:
+            messagebox.showwarning("입력 오류", "암호화할 텍스트를 입력하세요.")
+            return
+        if not password:
+            messagebox.showwarning("입력 오류", "비밀번호를 입력하세요.")
+            return
+        with self.lock:
+            if not self._ensure_card():
+                return
+            try:
+                pages = self.nfc.write_encrypted(text, password)
+                self.log(f"[암호화] 쓰기 완료 ({pages}페이지, {len(text)}자)")
+            except ACR122UError as e:
+                self.log(f"[암호화] 쓰기 오류: {e}")
+
+    def _encrypt_read(self):
+        password = self.enc_pw_var.get()
+        if not password:
+            messagebox.showwarning("입력 오류", "비밀번호를 입력하세요.")
+            return
+        with self.lock:
+            if not self._ensure_card():
+                return
+            try:
+                text = self.nfc.read_encrypted(password)
+                if text is None:
+                    self.log("[암호화] 암호화 데이터를 찾지 못했습니다.")
+                else:
+                    self.enc_text.delete("1.0", "end")
+                    self.enc_text.insert("1.0", text)
+                    self.log(f"[암호화] 복호화 성공 ({len(text)}자)")
+            except ACR122UError as e:
+                self.log(f"[암호화] 복호화 오류: {e}")
 
     def _firmware(self):
         with self.lock:
