@@ -56,6 +56,10 @@ Windows에서는 `run.bat`을 더블클릭해도 됩니다.
 - **암호화 데이터** — 비밀번호로 **AES-256-GCM** 암호화하여 태그에 저장/복원
   - PBKDF2-HMAC-SHA256 키 유도(솔트 포함). 비밀번호를 잊으면 복구 불가.
   - 카드 자체 보안과 무관하게 어떤 NTAG/Ultralight 태그에도 강력한 암호화 적용 가능.
+- **WiFi** — SSID·비밀번호·보안방식을 표준 WiFi NDEF(WPS/WSC) 레코드로 태그에 기록
+  - **안드로이드**: 탭하면 WiFi 연결 팝업이 뜹니다.
+  - **아이폰(iOS)**: WSC 자동 연결을 지원하지 않습니다.
+  - 보안방식: OPEN / WPA-PSK / WPA2-PSK / WPA·WPA2-PSK
 - **장치 제어** — 펌웨어 버전 조회, 부저음, 카드 인식음 on/off
 
 ## APDU 참고 (acr122u.py에서 사용)
