@@ -261,8 +261,21 @@ class ACR122U:
             page += 1
         return page - start_page  # 기록한 페이지 수
 
+    def write_url(self, uri, start_page=4):
+        """URL/URI를 NDEF URI 레코드로 NTAG/Ultralight에 기록. 기록한 페이지 수 반환."""
+        tlv = build_ndef_uri_tlv(uri)
+        if len(tlv) % 4:
+            tlv += bytes(4 - (len(tlv) % 4))
+        page = start_page
+        for i in range(0, len(tlv), 4):
+            self.write_block(page, list(tlv[i:i + 4]))
+            page += 1
+        return page - start_page
+
     def read_ndef_text(self, start_page=4, max_pages=40):
-        """NTAG/Ultralight에서 NDEF Text 레코드를 읽어 문자열로 반환 (없으면 None)."""
+        """
+        NTAG/Ultralight에서 NDEF Text 또는 URI 레코드를 읽어 문자열로 반환 (없으면 None).
+        """
         buf = []
         page = start_page
         while page < start_page + max_pages:
@@ -404,6 +417,39 @@ def build_ndef_text_tlv(text, lang="en"):
     return bytes([0x03, len(record)]) + record + bytes([0xFE])
 
 
+# NFC Forum URI RTD 접두어 코드 (0x00~0x23)
+URI_PREFIXES = [
+    "", "http://www.", "https://www.", "http://", "https://",
+    "tel:", "mailto:", "ftp://anonymous:anonymous@", "ftp://ftp.",
+    "ftps://", "sftp://", "smb://", "nfs://", "ftp://", "dav://",
+    "news:", "telnet://", "imap:", "rtsp://", "urn:", "pop:", "sip:",
+    "sips:", "tftp:", "btspp://", "btl2cap://", "btgoep://", "tcpobex://",
+    "irdaobex://", "file://", "urn:epc:id:", "urn:epc:tag:", "urn:epc:pat:",
+    "urn:epc:raw:", "urn:epc:", "urn:nfc:",
+]
+
+
+def build_ndef_uri_tlv(uri):
+    """URL/URI를 NDEF URI 레코드로 만들어 TLV로 감싼 bytes를 반환."""
+    # 가장 긴 접두어를 찾아 압축 (예: 'https://' → 코드 0x04)
+    code = 0
+    prefix = ""
+    for i, p in enumerate(URI_PREFIXES):
+        if i and uri.startswith(p) and len(p) > len(prefix):
+            code = i
+            prefix = p
+    payload = bytes([code]) + uri[len(prefix):].encode("utf-8")
+    if len(payload) < 256:
+        # 짧은 레코드: MB=ME=SR=1, TNF=001(well-known) → 0xD1
+        record = bytes([0xD1, 0x01, len(payload)]) + b"U" + payload
+    else:
+        # 긴 레코드: SR=0 → 0xC1, 페이로드 길이 4바이트
+        record = bytes([0xC1, 0x01]) + len(payload).to_bytes(4, "big") + b"U" + payload
+    if len(record) < 255:
+        return bytes([0x03, len(record)]) + record + bytes([0xFE])
+    return bytes([0x03, 0xFF]) + len(record).to_bytes(2, "big") + record + bytes([0xFE])
+
+
 def parse_ndef_text(data):
     """바이트열에서 NDEF Text 레코드를 찾아 텍스트를 반환 (없으면 None)."""
     i = 0
@@ -440,13 +486,9 @@ def _parse_ndef_record(rec):
         lang_len = status & 0x3F
         return payload[1 + lang_len:].decode("utf-8", errors="replace")
     if rec_type == b"U" and payload:
-        # URI 레코드(선택): 접두어 코드 + 나머지 문자열
-        prefixes = [
-            "", "http://www.", "https://www.", "http://", "https://",
-            "tel:", "mailto:",
-        ]
+        # URI 레코드: 접두어 코드 + 나머지 문자열
         code = payload[0]
-        prefix = prefixes[code] if code < len(prefixes) else ""
+        prefix = URI_PREFIXES[code] if code < len(URI_PREFIXES) else ""
         return prefix + payload[1:].decode("utf-8", errors="replace")
     return None
 

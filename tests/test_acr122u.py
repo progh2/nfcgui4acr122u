@@ -18,6 +18,7 @@ from acr122u import (  # noqa: E402
     ACR122U,
     ACR122UError,
     build_ndef_text_tlv,
+    build_ndef_uri_tlv,
     parse_ndef_text,
     build_encrypted_container,
     parse_encrypted_container,
@@ -74,6 +75,31 @@ def test_parse_uri_record_no_prefix():
     record = bytes([0xD1, 0x01, len(payload)]) + b"U" + payload
     tlv = bytes([0x03, len(record)]) + record + bytes([0xFE])
     assert parse_ndef_text(tlv) == "custom://path"
+
+
+def test_uri_roundtrip():
+    tlv = build_ndef_uri_tlv("https://example.com/path")
+    assert parse_ndef_text(tlv) == "https://example.com/path"
+
+
+def test_uri_prefix_compression_https():
+    # 'https://' → 접두어 코드 0x04, 본문에는 스킴이 빠져 있어야 함
+    tlv = build_ndef_uri_tlv("https://school.ac.kr")
+    assert tlv[0] == 0x03 and tlv[-1] == 0xFE
+    assert b"https://" not in tlv        # 접두어로 압축됨
+    assert b"school.ac.kr" in tlv
+
+
+def test_uri_prefix_compression_www():
+    tlv = build_ndef_uri_tlv("http://www.example.com")
+    # 페이로드 첫 바이트(URI 코드) == 0x01 (http://www.)
+    # TLV: [03][len][D1][01][plen]['U'][code]...
+    assert tlv[6] == 0x01
+
+
+def test_uri_tel_scheme():
+    tlv = build_ndef_uri_tlv("tel:+82212345678")
+    assert parse_ndef_text(tlv) == "tel:+82212345678"
 
 
 def test_parse_no_ndef_returns_none():
