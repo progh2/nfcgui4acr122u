@@ -257,3 +257,44 @@ def test_wifi_from_tag_no_wifi_returns_none():
     # 일반 텍스트 NDEF에는 WiFi 레코드가 없음
     text_tlv = build_ndef_text_tlv("hello", "en")
     assert parse_wifi_from_tag(text_tlv) is None
+
+
+# ---------------------------------------------------------------------- #
+# 태그 관리 (초기화 / 잠금) — 하드웨어 없이 메모리로 검증
+# ---------------------------------------------------------------------- #
+class _FakeCard(ACR122U):
+    """write_block/read_block만 메모리로 대체한 가짜 태그."""
+
+    def __init__(self, pages=48):
+        self.mem = {p: [0x11, 0x22, 0x33, 0x44] for p in range(pages)}
+        self.mem[2] = [0xAA, 0xBB, 0x00, 0x00]  # BCC1, Internal, LOCK0, LOCK1
+        self._pages = pages
+
+    def write_block(self, page, data):
+        if page >= self._pages:
+            raise ACR122UError("태그 끝")
+        self.mem[page] = list(data)
+
+    def read_block(self, page, length=16):
+        out = []
+        for p in range(page, page + length // 4):
+            if p not in self.mem:
+                raise ACR122UError("빈 페이지")
+            out += self.mem[p]
+        return out
+
+
+def test_erase_tag_zeros_user_pages():
+    fc = _FakeCard(pages=20)
+    n = fc.erase_tag(start_page=4, num_pages=36)
+    assert n == 16                       # 4~19 = 16페이지
+    assert fc.mem[4] == [0, 0, 0, 0]
+    assert fc.mem[19] == [0, 0, 0, 0]
+    assert fc.mem[3] == [0x11, 0x22, 0x33, 0x44]   # 3페이지는 안 건드림
+
+
+def test_lock_tag_preserves_internal_bytes():
+    fc = _FakeCard()
+    fc.lock_tag_static()
+    # 앞 2바이트(BCC1, Internal) 보존, 잠금 바이트만 0xFF
+    assert fc.mem[2] == [0xAA, 0xBB, 0xFF, 0xFF]
