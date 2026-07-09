@@ -13,11 +13,16 @@ import pytest
 # 저장소 루트를 import 경로에 추가 (tests/ 하위에서 실행되어도 acr122u를 찾도록)
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import acr122u  # noqa: E402
 from acr122u import (  # noqa: E402
     ACR122U,
     ACR122UError,
     build_ndef_text_tlv,
     parse_ndef_text,
+    build_encrypted_container,
+    parse_encrypted_container,
+    encrypt_bytes,
+    decrypt_bytes,
 )
 
 
@@ -113,3 +118,64 @@ def test_normalize_key_wrong_length_raises():
         ACR122U._normalize_key("FFFF")
     with pytest.raises(ACR122UError):
         ACR122U._normalize_key([0x01] * 7)
+
+
+# ---------------------------------------------------------------------- #
+# 비밀번호 기반 AES 암호화
+# ---------------------------------------------------------------------- #
+crypto = pytest.mark.skipif(
+    not acr122u.CRYPTO_AVAILABLE, reason="cryptography 미설치"
+)
+
+
+@crypto
+def test_encrypt_decrypt_roundtrip():
+    blob = encrypt_bytes("secret message", "pw1234")
+    assert decrypt_bytes(blob, "pw1234") == "secret message"
+
+
+@crypto
+def test_encrypt_unicode_roundtrip():
+    blob = encrypt_bytes("비밀 메시지 🔒", "한글암호")
+    assert decrypt_bytes(blob, "한글암호") == "비밀 메시지 🔒"
+
+
+@crypto
+def test_decrypt_wrong_password_raises():
+    blob = encrypt_bytes("top secret", "correct")
+    with pytest.raises(ACR122UError):
+        decrypt_bytes(blob, "wrong")
+
+
+@crypto
+def test_encrypt_is_nondeterministic():
+    # 매번 다른 salt/nonce → 같은 평문·비밀번호라도 암호문이 달라야 함
+    a = encrypt_bytes("same", "pw")
+    b = encrypt_bytes("same", "pw")
+    assert a != b
+
+
+@crypto
+def test_container_roundtrip():
+    container = build_encrypted_container("payload here", "mypw")
+    assert container[:4] == b"ENC1"
+    assert parse_encrypted_container(container, "mypw") == "payload here"
+
+
+@crypto
+def test_container_with_trailing_padding():
+    # 태그 읽기는 4바이트 배수로 패딩된 데이터를 돌려줄 수 있음 → 파싱이 견뎌야 함
+    container = build_encrypted_container("hello", "pw")
+    padded = container + bytes(3)
+    assert parse_encrypted_container(padded, "pw") == "hello"
+
+
+@crypto
+def test_container_wrong_password_raises():
+    container = build_encrypted_container("data", "right")
+    with pytest.raises(ACR122UError):
+        parse_encrypted_container(container, "nope")
+
+
+def test_parse_container_no_magic_returns_none():
+    assert parse_encrypted_container(bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]), "pw") is None
